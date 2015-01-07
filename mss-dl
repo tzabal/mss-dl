@@ -1,0 +1,135 @@
+#!/usr/bin/env python2
+# Copyright 2014 Tzanetos Balitsaris
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import argparse
+import os.path
+import re
+import shutil
+import sys
+
+import lxml.html
+from mutagen.id3 import ID3, TIT2, TPE1, APIC, COMM
+import requests
+import youtube_dl
+
+
+def add_id3_metadata(filename, metadata):
+    id3tag = ID3(filename)
+    id3tag.add(TIT2(encoding=3, text=metadata.get('song')))
+    id3tag.add(TPE1(encoding=3, text=metadata.get('artist')))
+    id3tag.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover',
+                    data=open(metadata.get('picture')).read()))
+    id3tag.add(COMM(encoding=3, lang='GBR', desc='a', text='Uploaded at '
+                    'MrSuicideSheep\'s YouTube channel on '
+                    + metadata.get('upload_date') + '.'))
+    id3tag.save()
+
+
+def download_video(video_url):
+    ydl_opts = {
+        'outtmpl': '%(title)s.%(ext)s',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192'
+        }]
+    }
+
+    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+
+
+def extract_info(video_url):
+    info = {}
+
+    regex_title = '^(.+) - (.+)$'
+    regex_uploader = '/user/MrSuicideSheep'
+    regex_upload_date = '^.+ ([0-9]{1,2} [^0-9]{3} [0-9]{4})$'
+
+    xpath_title = '//span[@id="eow-title"]/@title'
+    xpath_uploader = '//div[@id="watch7-user-header"]/a/@href'
+    xpath_upload_date = '//div[@id="watch-uploader-info"]/strong/text()'
+    xpath_picture_url = '//div[@id="watch7-content"]/link[@itemprop="thumbnailUrl"]/@href'
+
+    page = requests.get(video_url, headers={"Accept-Language": "en-GB"})
+    tree = lxml.html.fromstring(page.text)
+
+    uploader = tree.xpath(xpath_uploader)[0]
+    match = re.match(regex_uploader, uploader)
+    if not match:
+        sys.stderr.write(video_url + ' is not uploaded by MrSuicideSheep.')
+        sys.exit(1)
+
+    info['title'] = tree.xpath(xpath_title)[0]
+    match = re.match(regex_title, info['title'])
+    if match:
+        info['artist'] = match.group(1)
+        info['song'] = match.group(2)
+
+    upload_date = tree.xpath(xpath_upload_date)[0]
+    match = re.match(regex_upload_date, upload_date)
+    if match:
+        info['upload_date'] = match.group(1)
+
+    picture_url = tree.xpath(xpath_picture_url)[0]
+    picture = requests.get(picture_url, stream=True)
+    with open(os.path.basename(picture_url), 'wb') as f:
+        shutil.copyfileobj(picture.raw, f)
+    info['picture'] = os.path.basename(picture_url)
+
+    return info
+
+
+def process_arguments():
+    desc = 'MrSuicideSheep'
+    parser = argparse.ArgumentParser(description=desc)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-u', '--url', help='a video URL')
+    group.add_argument('-f', '--file', help='a file that contains a list of video URLs')
+
+    urls = []
+    arguments = parser.parse_args()
+    if arguments.url:
+        urls.append(arguments.url)
+    if arguments.file:
+        if not os.path.isfile(arguments.file):
+            sys.stderr.write('file is not an existing regular file.')
+            sys.exit(1)
+        with open(arguments.file) as f:
+            for line in f:
+                urls.append(line.strip())
+
+    regex_url = '^https://www\.youtube\.com/watch\?v=.{11}$'
+    for url in urls:
+        match = re.match(regex_url, url)
+        if not match:
+            sys.stderr.write('Invalid video url: ' + url)
+            sys.exit(1)
+
+    return urls
+
+
+def main():
+    urls = process_arguments()
+    for url in urls:
+        info = extract_info(url)
+        download_video(url)
+        add_id3_metadata(info['title'] + '.mp3', info)
+    if os.path.isfile(info.get('picture')):
+            os.remove(info['picture'])
+
+
+if __name__ == '__main__':
+    main()
